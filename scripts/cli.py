@@ -1,4 +1,4 @@
-"""抖音 CDP CLI 入口。退出码: 0=成功, 1=未登录, 2=错误"""
+"""抖音 CDP CLI 入口。退出码: 0=成功, 1=未登录, 2=错误, 3=风控限流"""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,7 @@ def _run(args, fn):
     """通用执行框架：启动 Chrome → 执行 → 关闭。"""
     sys.path.insert(0, os.path.dirname(__file__))
     from chrome_launcher import launch_chrome, wait_for_chrome
+    from douyin.errors import RateLimitError
 
     headless = _should_use_headless()
     proc = launch_chrome(port=args.port, headless=headless, user_data_dir=DEFAULT_PROFILE_DIR)
@@ -47,6 +48,16 @@ def _run(args, fn):
         result = fn(page)
         print(json.dumps(result, ensure_ascii=False))
         return 0
+    except RateLimitError as e:
+        # 风控限流：返回结构化信息，退出码 3
+        print(json.dumps({
+            "success": False,
+            "error": str(e),
+            "rate_limited": True,
+            "retry_after": e.retry_after,
+            "reason": e.reason,
+        }, ensure_ascii=False))
+        return 3
     except Exception as e:
         print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
         return 2
@@ -78,6 +89,7 @@ def cmd_user_posts(args) -> int:
                     "aweme_id": v.aweme_id,
                     "desc": v.desc,
                     "create_time": v.create_time,
+                    "is_top": v.is_top,
                     "author": v.author.nickname,
                     "digg_count": v.stats.digg_count,
                 }
@@ -92,6 +104,27 @@ def cmd_search_videos(args) -> int:
 
     def _fn(page):
         videos = search_videos(page, args.keyword, count=args.count)
+        return {
+            "success": True,
+            "videos": [
+                {
+                    "aweme_id": v.aweme_id,
+                    "desc": v.desc,
+                    "create_time": v.create_time,
+                    "author": v.author.nickname,
+                    "digg_count": v.stats.digg_count,
+                }
+                for v in videos
+            ],
+        }
+    return _run(args, _fn)
+
+
+def cmd_fetch_feed(args) -> int:
+    from douyin.feed import fetch_home_feed
+
+    def _fn(page):
+        videos = fetch_home_feed(page, count=args.count, refresh_index=args.refresh_index)
         return {
             "success": True,
             "videos": [
@@ -124,6 +157,10 @@ def main() -> None:
     p_search.add_argument("--keyword", required=True)
     p_search.add_argument("--count", type=int, default=10)
 
+    p_feed = sub.add_parser("fetch-feed")
+    p_feed.add_argument("--count", type=int, default=20)
+    p_feed.add_argument("--refresh-index", type=int, default=0)
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -134,6 +171,7 @@ def main() -> None:
         "check-login": cmd_check_login,
         "user-posts": cmd_user_posts,
         "search-videos": cmd_search_videos,
+        "fetch-feed": cmd_fetch_feed,
     }
     sys.exit(dispatch[args.command](args))
 

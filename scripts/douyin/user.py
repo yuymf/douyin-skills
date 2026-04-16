@@ -8,6 +8,7 @@ import time
 from .cdp import Page
 from .errors import NoResultsError
 from .human import sleep_random
+from .rate_guard import raise_if_risky
 from .types import Video
 from .urls import make_user_url
 
@@ -136,7 +137,10 @@ def _fetch_via_page_js(page: Page, sec_uid: str, count: int) -> list[Video]:
     raw_list = json.loads(value)
     if not isinstance(raw_list, list) or len(raw_list) == 0:
         raise NoResultsError(f"页面内 fetch 返回空列表: {sec_uid}")
-    return _parse_aweme_list(raw_list[:count])
+    videos = _parse_aweme_list(raw_list)
+    # 过滤置顶帖，确保返回的是真正的最新帖子
+    non_pinned = [v for v in videos if not v.is_top]
+    return non_pinned[:count]
 
 
 def _parse_aweme_list(raw_list: list) -> list[Video]:
@@ -157,6 +161,7 @@ def list_user_posts(page: Page, sec_uid: str, count: int = 10) -> list[Video]:
 
     Raises:
         NoResultsError: 无法提取视频数据。
+        RateLimitError: 检测到风控限流。
     """
     url = make_user_url(sec_uid)
     page.navigate(url)
@@ -165,10 +170,14 @@ def list_user_posts(page: Page, sec_uid: str, count: int = 10) -> list[Video]:
     # 等页面 JS 完成初始化和 cookie 注入
     sleep_random(2500, 4000)
 
+    # 风控检测：检查是否出现验证码/登录弹窗
+    raise_if_risky(page)
+
     # 主路径：页面内 fetch（借用 cookie/ms_token，绕过跨域和签名问题）
     try:
         videos = _fetch_via_page_js(page, sec_uid, count)
-        logger.info("用户 %s 通过页面内 fetch 提取到 %d 个视频", sec_uid, len(videos))
+        pinned_count = sum(1 for v in videos if v.is_top)
+        logger.info("用户 %s 通过页面内 fetch 提取到 %d 个视频（已过滤 %d 条置顶帖）", sec_uid, len(videos), pinned_count)
         return videos
     except NoResultsError as e:
         logger.warning("页面内 fetch 失败，降级到 RENDER_DATA: %s", e)
@@ -187,6 +196,8 @@ def list_user_posts(page: Page, sec_uid: str, count: int = 10) -> list[Video]:
     if not isinstance(raw_list, list):
         raise NoResultsError(f"数据格式异常: {type(raw_list)}")
 
-    videos = [Video.from_dict(item) for item in raw_list[:count]]
-    logger.info("用户 %s 通过 RENDER_DATA 提取到 %d 个视频", sec_uid, len(videos))
-    return videos
+    videos = [Video.from_dict(item) for item in raw_list]
+    # 过滤置顶帖，确保返回的是真正的最新帖子
+    non_pinned = [v for v in videos if not v.is_top]
+    logger.info("用户 %s 通过 RENDER_DATA 提取到 %d 个视频（过滤 %d 条置顶帖）", sec_uid, len(non_pinned), len(videos) - len(non_pinned))
+    return non_pinned[:count]

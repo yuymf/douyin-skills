@@ -38,6 +38,7 @@ class Video:
     aweme_id: str = ""
     desc: str = ""
     create_time: int = 0
+    is_top: bool = False
     author: Author = field(default_factory=Author)
     stats: VideoStats = field(default_factory=VideoStats)
 
@@ -47,6 +48,7 @@ class Video:
             aweme_id=d.get("awemeId", d.get("aweme_id", "")),
             desc=d.get("desc", ""),
             create_time=d.get("createTime", d.get("create_time", 0)),
+            is_top=bool(d.get("is_top", 0)),
             author=Author.from_dict(d.get("author", d.get("authorInfo", {}))),
             stats=VideoStats.from_dict(d.get("stats", d.get("statistics", {}))),
         )

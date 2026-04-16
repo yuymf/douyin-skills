@@ -7,6 +7,7 @@ import logging
 from .cdp import Page
 from .errors import NoResultsError
 from .human import sleep_random
+from .rate_guard import raise_if_risky
 from .types import Video
 from .urls import make_search_url
 
@@ -44,12 +45,16 @@ def search_videos(page: Page, keyword: str, count: int = 10) -> list[Video]:
 
     Raises:
         NoResultsError: 无法获取搜索结果。
+        RateLimitError: 检测到风控限流。
     """
     url = make_search_url(keyword)
     page.navigate(url)
     page.wait_for_load()
     page.wait_dom_stable()
     sleep_random(2000, 4000)
+
+    # 风控检测：检查是否出现验证码/登录弹窗
+    raise_if_risky(page)
 
     result = page.evaluate(_EXTRACT_SEARCH_JS)
     if not result:
