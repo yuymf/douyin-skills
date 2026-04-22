@@ -216,6 +216,91 @@ class Page:
             {"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": 1},
         )
 
+    def wait_for_element(self, selector: str, timeout: float = 30.0) -> str:
+        """等待元素出现，返回 objectId。
+
+        Args:
+            selector: CSS 选择器。
+            timeout: 超时秒数。
+
+        Raises:
+            ElementNotFoundError: 超时仍未找到元素。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            oid = self.query_selector(selector)
+            if oid:
+                return oid
+            time.sleep(0.5)
+        raise ElementNotFoundError(selector)
+
+    def click_element(self, selector: str) -> None:
+        """点击指定选择器的元素（通过 CDP Input 事件，isTrusted=true）。
+
+        先将元素滚动到可视区域，再用坐标点击，模拟真实鼠标交互。
+        """
+        box = self.evaluate(
+            f"""
+            (() => {{
+                const el = document.querySelector({json.dumps(selector)});
+                if (!el) return null;
+                el.scrollIntoView({{block: 'center'}});
+                const rect = el.getBoundingClientRect();
+                return {{x: rect.left + rect.width / 2, y: rect.top + rect.height / 2}};
+            }})()
+            """
+        )
+        if not box:
+            return
+        x = box["x"] + random.uniform(-3, 3)
+        y = box["y"] + random.uniform(-3, 3)
+        self.mouse_move(x, y)
+        time.sleep(random.uniform(0.03, 0.08))
+        self.mouse_click(x, y)
+
+    def type_text(self, text: str, delay_ms: int = 50) -> None:
+        """逐字符输入文本（CDP 键盘事件）。
+
+        每个字符发送 keyDown + keyUp 事件，字符间随机延迟模拟人类打字节奏。
+        """
+        for char in text:
+            self._send_session(
+                "Input.dispatchKeyEvent",
+                {"type": "keyDown", "text": char},
+            )
+            self._send_session(
+                "Input.dispatchKeyEvent",
+                {"type": "keyUp", "text": char},
+            )
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000.0 + random.uniform(0, 0.03))
+
+    def press_key(self, key: str) -> None:
+        """按下并释放指定键（Enter / Tab / ArrowDown 等）。"""
+        key_map = {
+            "Enter": {"key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13},
+            "ArrowDown": {
+                "key": "ArrowDown",
+                "code": "ArrowDown",
+                "windowsVirtualKeyCode": 40,
+            },
+            "Tab": {"key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9},
+            "Backspace": {
+                "key": "Backspace",
+                "code": "Backspace",
+                "windowsVirtualKeyCode": 8,
+            },
+        }
+        info = key_map.get(key, {"key": key, "code": key})
+        self._send_session(
+            "Input.dispatchKeyEvent",
+            {"type": "keyDown", **info},
+        )
+        self._send_session(
+            "Input.dispatchKeyEvent",
+            {"type": "keyUp", **info},
+        )
+
     def inject_stealth(self) -> None:
         """注入反检测脚本。"""
         self._send_session(
