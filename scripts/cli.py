@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
 import sys
+
+# Windows 上 stdout/stderr 默认 GBK 编码，无法输出特殊 Unicode 字符
+# 在模块加载时就将 stdout/stderr 切换为 UTF-8
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 DEFAULT_PORT = 9333
 DEFAULT_PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".douyin", "chrome-profile")
