@@ -67,14 +67,163 @@ def _run(args, fn):
 
 
 def cmd_check_login(args) -> int:
+    _CHECK_LOGIN_JS = r"""
+    (() => {
+        const debug = {};
+
+        // 1. 明确被强制跳转到登录页 → 未登录
+        debug.href = location.href;
+        if (location.href.includes('/login') || location.href.includes('login_redirect')) {
+            return {logged_in: false, reason: 'login_redirect', debug};
+        }
+
+        // 2. 有可见的登录弹窗/引导 → 未登录
+        const loginSelectors = '.login-guide, .login-panel, [class*="login-modal"], [class*="LoginModal"]';
+        const loginEl = document.querySelector(loginSelectors);
+        if (loginEl && loginEl.offsetHeight > 0) {
+            return {logged_in: false, reason: 'login_modal', debug};
+        }
+
+        // 3. 检查 cookie：sessionid 必须存在且非空
+        const cookies = document.cookie;
+        debug.cookies_snippet = cookies.slice(0, 200);
+        const sessionMatch = cookies.match(/(?:^|;\s*)sessionid=([^;]+)/);
+        const hasSession = sessionMatch && sessionMatch[1].length > 0;
+        debug.has_sessionid = hasSession;
+
+        // 4. 检查页面内嵌的用户数据（抖音 __RENDER_DATA__ 或 localStorage）
+        let hasUserInfo = false;
+        try {
+            const rd = window.__RENDER_DATA__;
+            if (rd && typeof rd === 'object') {
+                const uid = rd?.app?.user?.id || rd?.user?.id;
+                debug.render_data_uid = uid;
+                if (uid) hasUserInfo = true;
+            }
+        } catch(e) {}
+        try {
+            const ls = localStorage.getItem('user_info') || localStorage.getItem('userInfo');
+            debug.localStorage_user = !!ls;
+            if (ls) hasUserInfo = true;
+        } catch(e) {}
+
+        // 5. 检查导航栏登录按钮文本（未登录时显示"登录"）
+        //    抖音首页右上角：未登录显示登录按钮，已登录显示头像
+        const navButtons = document.querySelectorAll('button, [role="button"], a');
+        for (const btn of navButtons) {
+            const text = (btn.textContent || '').trim();
+            if (text === '登录') {
+                debug.login_button_found = true;
+                return {logged_in: false, reason: 'login_button_visible', debug};
+            }
+        }
+
+        // 6. 登录后才有的导航元素
+        const loggedSelectors = [
+            '[data-e2e="avatar-icon"]',
+            '[data-e2e="user-avatar"]',
+            '.avatar-icon',
+            '.sidebar-user-info',
+        ];
+        for (const sel of loggedSelectors) {
+            const el = document.querySelector(sel);
+            if (el && el.offsetHeight > 0) {
+                debug.logged_selector = sel;
+                return {logged_in: true, reason: 'logged_element:' + sel, debug};
+            }
+        }
+
+        // 综合判定
+        if (hasSession || hasUserInfo) {
+            return {logged_in: true, reason: 'cookie_or_render_data', debug};
+        }
+
+        return {logged_in: false, reason: 'no_login_evidence', debug};
+    })()
+    """
+
     def _fn(page):
         page.navigate("https://www.douyin.com")
         page.wait_for_load()
-        is_login = page.evaluate(
-            "location.href.includes('/login') || !!document.querySelector('.login-guide')"
-        )
-        return {"success": True, "logged_in": not is_login}
+        # 等待页面 JS 渲染完成
+        import time
+        time.sleep(3)
+        result = page.evaluate(_CHECK_LOGIN_JS)
+        logged_in = result.get("logged_in", False) if isinstance(result, dict) else bool(result)
+        out = {"success": True, "logged_in": logged_in}
+        if args.debug and isinstance(result, dict):
+            out["reason"] = result.get("reason")
+            out["debug"] = result.get("debug")
+        return out
     return _run(args, _fn)
+
+
+def cmd_login(args) -> int:
+    """打开 Chrome 让用户手动登录抖音，登录后 cookie 自动保存在 profile 中。"""
+    import time
+
+    sys.path.insert(0, os.path.dirname(__file__))
+    from chrome_launcher import launch_chrome, wait_for_chrome
+
+    # 必须有界面，不能用 headless
+    proc = launch_chrome(port=args.port, headless=False, user_data_dir=DEFAULT_PROFILE_DIR)
+    wait_for_chrome(args.port)
+
+    cdp = None
+    try:
+        cdp, page = _get_page(args.host, args.port)
+        # 导航到抖音首页，用户点击右上角"登录"按钮即可
+        page.navigate("https://www.douyin.com")
+        page.wait_for_load()
+
+        print("浏览器已打开抖音首页，请点击右上角「登录」按钮完成登录。", file=sys.stderr)
+        print("登录成功后请回到终端按 Enter 确认...", file=sys.stderr)
+
+        # 等待用户在终端按 Enter
+        input()
+
+        # 尝试验证登录状态（可能因页面跳转导致 CDP 断连，需容错）
+        logged_in = False
+        for attempt in range(3):
+            try:
+                # 重新获取 page 连接（之前的可能已失效）
+                cdp2, page2 = _get_page(args.host, args.port)
+                page2.navigate("https://www.douyin.com")
+                page2.wait_for_load()
+                time.sleep(3)
+
+                _CHECK_JS = r"""
+                (() => {
+                    const sessionMatch = document.cookie.match(/(?:^|;\s*)sessionid=([^;]+)/);
+                    return sessionMatch && sessionMatch[1].length > 0;
+                })()
+                """
+                logged_in = bool(page2.evaluate(_CHECK_JS))
+                try:
+                    cdp2.close()
+                except Exception:
+                    pass
+                break
+            except Exception:
+                time.sleep(2)
+                continue
+
+        if logged_in:
+            print(json.dumps({"success": True, "logged_in": True}, ensure_ascii=False))
+            return 0
+        else:
+            print(json.dumps({"success": True, "logged_in": False}, ensure_ascii=False))
+            return 1
+    except Exception as e:
+        print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+        return 2
+    finally:
+        # 关闭 CDP 连接，不杀 Chrome 进程，保留登录态
+        try:
+            if cdp:
+                cdp.close()
+        except Exception:
+            pass
 
 
 def cmd_user_posts(args) -> int:
@@ -147,7 +296,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("check-login")
+    p_check = sub.add_parser("check-login")
+    p_check.add_argument("--debug", action="store_true", help="输出调试信息")
+
+    sub.add_parser("login", help="打开浏览器手动登录抖音")
 
     p_user = sub.add_parser("user-posts")
     p_user.add_argument("--sec-uid", required=True)
@@ -169,6 +321,7 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     dispatch = {
         "check-login": cmd_check_login,
+        "login": cmd_login,
         "user-posts": cmd_user_posts,
         "search-videos": cmd_search_videos,
         "fetch-feed": cmd_fetch_feed,
